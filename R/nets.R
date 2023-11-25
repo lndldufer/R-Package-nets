@@ -1,4 +1,4 @@
-
+#' @import glmnet
 .packageName <- "nets"
 
 nets <- function( y , GN=TRUE , CN=TRUE , p=1 , lambda=stop("shrinkage parameter 'lambda' has not been set") , alpha.init=NULL , rho.init=NULL , algorithm='activeshooting' , weights='adaptive' , iter.in=100 , iter.out=2 , verbose=FALSE ){
@@ -22,8 +22,8 @@ nets <- function( y , GN=TRUE , CN=TRUE , p=1 , lambda=stop("shrinkage parameter
   if( !(algorithm %in% c('shooting','activeshooting')) ){
     stop("The algorihm has to be set to: shooting' or 'activeshooting'")  
   }
-  if( !(weights %in% c('adaptive','none')) ){
-    stop("The lasso weights have to be set to: 'adaptive', or 'none'")  
+  if( !(weights %in% c('adaptive','none','ridge')) ){
+    stop("The lasso weights have to be set to: 'adaptive' 'ridge', or 'none'")  
   }
   
   # define variables
@@ -83,6 +83,24 @@ nets <- function( y , GN=TRUE , CN=TRUE , p=1 , lambda=stop("shrinkage parameter
       rho.pre     <- PC[ upper.tri(PC) ]
       rho.weights <- 1/(abs(rho.pre)+1e-4)      
     }  
+    else{
+      iter.out <- 1
+    }
+  }
+  
+  if( weights == 'ridge'){
+    if (GN == TRUE){
+      alpha <- ridge_pre_alpha(y)
+      eps <- y[2:T,] - y[1:(T-1),] %*% alpha
+      
+      alpha.weights <- cac_alpha_weights(alpha)
+    }
+    else{
+      eps <- y
+    }
+    if (CN == TRUE){
+      rho.weights <- cac_rho_weights(eps)
+    }
     else{
       iter.out <- 1
     }
@@ -229,4 +247,67 @@ predict.nets <- function( object , newdata , ... ){
   
   # output
   list( y.hat=y.hat , rss=rss )
+}
+
+ridge_reg <- function(y,x){
+  # use Cross-validation to choose best lambda
+  cvfit <- glmnet::cv.glmnet(x,y,family = "gaussian",standardize = FALSE,
+                     alpha = 0,gamma = 1,intercept=FALSE)
+  
+  # fit
+  a <- coef(glmnet::glmnet(x,y,lambda = cvfit$lambda.min,family = "gaussian",
+                   standardize = FALSE,alpha = 0,gamma = 1,intercept=FALSE))
+  #a <- coef(cvfit, s = "lambda.min")
+  return(a[2:(nrow(a))])
+}
+
+ridge_pre_alpha <- function(y){
+  # p = 1
+  dims <- dim(y)
+  yy = y[2:dims[1],]
+  xx = y[1:(dims[1]-1),]
+  pre_alpha = matrix(nrow = dims[2],ncol = dims[2])
+  for (i in 1:dims[2]){
+    pre_alpha[,i] = ridge_reg(yy[,i],xx)
+  }
+  return(pre_alpha)
+}
+
+cac_alpha_weights <- function(alpha){
+  # 对T<N*P的数据集，按简单线性回归确定alpha pre值和LASSO权重
+  # pre_alpha <- ridge_pre_alpha(y)
+  alpha.weights <- 1/(abs(alpha)+1e-4)
+  return(alpha.weights[1:(ncol(alpha)**2)]) #一列一列的展开
+}
+
+ridge_pre_rho <- function(y){
+  a = ncol(y)
+  
+  # 标准化，剔除标准差影响
+  sdy = y
+  for (i in 1:a){
+    sdy[,i] = sdy[,i] / sd(sdy[,i])
+  }
+  
+  rho = matrix(0,a,a)
+  
+  for (i in 1:(a-1)){
+    y_last = sdy[,i]-sdy %*% rho[,i]
+    if (i == (a-1)){
+      rho[i,a] = coef(lm(y_last ~ 0 + sdy[,a]))
+    }
+    else{
+      pre_rho = ridge_reg(y_last,sdy[,(i+1):a])
+      rho[i,(i+1):a] = pre_rho
+    }
+  }
+  return(rho)
+}
+
+cac_rho_weights <- function(y){
+  # 对T<N*P的数据集，按两两相关系数确定rho pre值和LASSO权重
+  PC <- ridge_pre_rho(y)     
+  rho.pre <- PC[ upper.tri(PC) ]
+  rho.weights <- 1/(abs(rho.pre)+1e-4)  
+  return(rho.weights)
 }
